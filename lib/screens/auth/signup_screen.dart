@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -60,8 +61,15 @@ class _SignUpScreenState extends State<SignUpScreen> {
       // new signed-in, unlinked user) is what's visible next, instead of
       // this pushed SignUpScreen staying on top of it.
       if (mounted) Navigator.of(context).popUntil((route) => route.isFirst);
-    } catch (_) {
-      setState(() => errorText = "Sign up failed. That email may already be in use.");
+    } on FirebaseAuthException catch (e) {
+      setState(() => errorText = switch (e.code) {
+            'email-already-in-use' => "That email is already registered. Try logging in instead.",
+            'weak-password' => "Choose a stronger password.",
+            'invalid-email' => "That email address looks invalid.",
+            _ => "Sign up failed: ${e.message ?? e.code}",
+          });
+    } catch (e) {
+      setState(() => errorText = "Sign up failed: $e");
     } finally {
       if (mounted) setState(() => isSubmitting = false);
     }

@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -46,8 +47,15 @@ class _LoginScreenState extends State<LoginScreen> {
       await authService.signIn(email: email, password: password);
       // AuthGate listens to the auth state stream and swaps screens once
       // sign-in succeeds, so no manual navigation is needed here.
-    } catch (_) {
-      setState(() => errorText = "Could not sign in. Check your email and password.");
+    } on FirebaseAuthException catch (e) {
+      setState(() => errorText = switch (e.code) {
+            'user-not-found' || 'wrong-password' || 'invalid-credential' =>
+              "Incorrect email or password.",
+            'invalid-email' => "That email address looks invalid.",
+            _ => "Could not sign in: ${e.message ?? e.code}",
+          });
+    } catch (e) {
+      setState(() => errorText = "Could not sign in: $e");
     } finally {
       if (mounted) setState(() => isSubmitting = false);
     }
