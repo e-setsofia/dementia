@@ -40,7 +40,6 @@ dependencies:
   provider: ^6.1.5
   flutter_local_notifications: ^19.5.0
   timezone: ^0.10.1
-  flutter_timezone: ^3.0.1
 
 dev_dependencies:
   flutter_test:

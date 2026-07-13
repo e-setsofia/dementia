@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
 import 'package:timezone/timezone.dart' as tz;
 
@@ -22,14 +21,7 @@ class NotificationService {
     if (_initialized) return;
 
     tz_data.initializeTimeZones();
-    try {
-      final timeZoneName = await FlutterTimezone.getLocalTimezone();
-      tz.setLocalLocation(tz.getLocation(timeZoneName));
-    } catch (_) {
-      // Fall back to UTC if the device's timezone can't be resolved; the
-      // reminder still repeats daily, just possibly at the wrong hour.
-      tz.setLocalLocation(tz.getLocation('UTC'));
-    }
+    tz.setLocalLocation(tz.getLocation(_localFixedOffsetZoneName()));
 
     const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
     const initSettings = InitializationSettings(android: androidSettings);
@@ -93,4 +85,20 @@ class NotificationService {
       await scheduleDaily(medication);
     }
   }
+}
+
+/// Resolves the device's local UTC offset (via Dart's own DateTime, no
+/// native plugin needed) to one of the timezone package's fixed-offset
+/// "Etc/GMT" zones. Note the IANA Etc/GMT sign convention is inverted from
+/// normal usage: Etc/GMT-2 means UTC+2. Offsets are rounded to the nearest
+/// whole hour, so places with half-hour offsets (e.g. India, UTC+5:30) get
+/// approximated, and daylight-saving transitions aren't tracked since a
+/// fixed offset has no DST rules. Both are acceptable v1 limitations for a
+/// reminder that only needs to land within the right hour.
+String _localFixedOffsetZoneName() {
+  final offsetHours = (DateTime.now().timeZoneOffset.inMinutes / 60).round();
+  final clamped = offsetHours.clamp(-12, 14);
+  if (clamped == 0) return 'Etc/GMT';
+  final sign = clamped > 0 ? '-' : '+';
+  return 'Etc/GMT$sign${clamped.abs()}';
 }
