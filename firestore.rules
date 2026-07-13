@@ -1,0 +1,31 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function linkedTo(patientId) {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.linkedUid == patientId;
+    }
+
+    match /users/{uid} {
+      // Any signed-in user can read profiles (needed to look up a patient by pairing code).
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    match /patients/{patientId} {
+      allow read, write: if isSignedIn() &&
+        (request.auth.uid == patientId || linkedTo(patientId));
+
+      match /{document=**} {
+        allow read, write: if isSignedIn() &&
+          (request.auth.uid == patientId || linkedTo(patientId));
+      }
+    }
+  }
+}
