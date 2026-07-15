@@ -7,12 +7,26 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     role TEXT NOT NULL CHECK (role IN ('patient', 'caregiver')),
     name TEXT,
     age INT,
-    condition TEXT,
+    condition TEXT,           -- legacy: keep for compatibility
     blood_group TEXT,
+    medical_conditions TEXT,  -- free-text, comma-separated conditions
+    allergies TEXT,           -- free-text, comma-separated allergies
+    pairing_code TEXT UNIQUE, -- 6-character code for patient pairing
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 2. Create Medications Table
+-- 2. Caregiver–Patient Link Table
+-- Links each caregiver account to one or more patient accounts.
+-- After creating both accounts, insert a row here to pair them.
+CREATE TABLE IF NOT EXISTS public.caregiver_patients (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    caregiver_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+    patient_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(caregiver_id, patient_id)
+);
+
+-- 3. Create Medications Table
 CREATE TABLE IF NOT EXISTS public.medications (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     patient_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
@@ -38,10 +52,20 @@ CREATE TABLE IF NOT EXISTS public.appointments (
     title TEXT NOT NULL,
     doctor_name TEXT,
     appointment_time TIMESTAMPTZ NOT NULL,
+    attended BOOLEAN DEFAULT false,   -- updated after the appointment
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 5. Create Emergency Alerts Table
+-- 5. Create Medication Logs Table (tracks taken / missed events)
+CREATE TABLE IF NOT EXISTS public.medication_logs (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    patient_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+    medication_id UUID REFERENCES public.medications(id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK (status IN ('taken', 'missed')),
+    logged_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 6. Create Emergency Alerts Table
 CREATE TABLE IF NOT EXISTS public.emergency_alerts (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     patient_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
@@ -55,8 +79,9 @@ ALTER TABLE public.medications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.schedules ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.appointments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.emergency_alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.medication_logs ENABLE ROW LEVEL SECURITY;
 
--- 6. Setup RLS Policies
+-- 7. Setup RLS Policies
 
 -- Profiles Policies
 DROP POLICY IF EXISTS "Users can view their own profile" ON public.profiles;
@@ -128,17 +153,44 @@ USING (
     (auth.jwt() -> 'user_metadata' ->> 'role') = 'caregiver'
 );
 
--- 7. Automated Profile Creation Trigger
+-- Medication Logs Policies
+DROP POLICY IF EXISTS "Patients can log their own medications" ON public.medication_logs;
+CREATE POLICY "Patients can log their own medications"
+ON public.medication_logs FOR INSERT
+WITH CHECK (auth.uid() = patient_id);
+
+DROP POLICY IF EXISTS "Patients can view their own medication logs" ON public.medication_logs;
+CREATE POLICY "Patients can view their own medication logs"
+ON public.medication_logs FOR SELECT
+USING (auth.uid() = patient_id);
+
+DROP POLICY IF EXISTS "Caregivers can view and manage medication logs" ON public.medication_logs;
+CREATE POLICY "Caregivers can view and manage medication logs"
+ON public.medication_logs FOR ALL
+USING (
+    (auth.jwt() -> 'user_metadata' ->> 'role') = 'caregiver'
+);
+
+-- 8. Automated Profile Creation Trigger
 -- When a user registers through Supabase Auth, automatically insert a blank profile.
--- You can specify the role in the user metadata during signup (e.g. metadata: { role: 'patient' })
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
+DECLARE
+    new_pairing_code TEXT;
 BEGIN
-    INSERT INTO public.profiles (id, role, name)
+    -- Generate a 6-character alphanumeric code only for patients
+    IF coalesce(new.raw_user_meta_data->>'role', 'patient') = 'patient' THEN
+        new_pairing_code := upper(substring(md5(random()::text) from 1 for 6));
+    ELSE
+        new_pairing_code := NULL;
+    END IF;
+
+    INSERT INTO public.profiles (id, role, name, pairing_code)
     VALUES (
         new.id,
         coalesce(new.raw_user_meta_data->>'role', 'patient'),
-        coalesce(new.raw_user_meta_data->>'name', 'New User')
+        coalesce(new.raw_user_meta_data->>'name', 'New User'),
+        new_pairing_code
     );
     RETURN new;
 END;
@@ -149,3 +201,25 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- 9. RPC Function for Pairing Caregiver to Patient
+CREATE OR REPLACE FUNCTION public.pair_caregiver(p_code TEXT)
+RETURNS void AS $$
+DECLARE
+    target_patient_id UUID;
+BEGIN
+    -- Find the patient with the matching code
+    SELECT id INTO target_patient_id
+    FROM public.profiles
+    WHERE pairing_code = p_code AND role = 'patient';
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Invalid pairing code';
+    END IF;
+
+    -- Insert the pairing (assuming auth.uid() is the caregiver)
+    INSERT INTO public.caregiver_patients (caregiver_id, patient_id)
+    VALUES (auth.uid(), target_patient_id)
+    ON CONFLICT (caregiver_id, patient_id) DO NOTHING;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
